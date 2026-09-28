@@ -138,6 +138,31 @@ test("Redweb socket contract validates commands, dispatches legacy handler paylo
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(errors.length, 2);
   assert.deepEqual(sendFailures, [1011]);
+
+  const serializationErrors = [];
+  const invalidOutputSocket = {
+    context: { protocol: { version: "2" } },
+    close: (code, reason) => serializationErrors.push([code, reason]),
+  };
+  installContractTransport({ handleError: (_socket, error) => serializationErrors.push(error) }, invalidOutputSocket);
+  const cyclic = { type: "joined", id: "p4", playerGivenIndex: null, player: {} };
+  cyclic.player.self = cyclic;
+  assert.equal(invalidOutputSocket.sendJson(cyclic), false);
+  assert.match(serializationErrors[0].message, /^Converting circular structure to JSON/);
+  assert.deepEqual(serializationErrors[1], [1011, "Invalid server message"]);
+
+  const slowClose = [];
+  const slowSocket = {
+    context: { protocol: { version: "2" } },
+    sendEvent: () => new Promise(() => {}),
+    close: (code, reason) => slowClose.push([code, reason]),
+  };
+  installContractTransport(route, slowSocket);
+  for (let index = 0; index < 64; index++) {
+    assert.equal(slowSocket.sendJson({ type: "match_started" }), true);
+  }
+  assert.equal(slowSocket.sendJson({ type: "match_started" }), false);
+  assert.deepEqual(slowClose, [[1013, "Slow consumer"]]);
 });
 
 function availableMatch(matchId, options = {}) {

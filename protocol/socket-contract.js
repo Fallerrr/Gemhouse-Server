@@ -104,6 +104,8 @@ const eventSchemas = {
 
 const schemas = Object.freeze({ ...commandSchemas, ...eventSchemas });
 const contract = defineSocketContract("2", schemas, { validationTimeoutMs: 3000 });
+const MAX_PENDING_CONTRACT_MESSAGES = 64;
+const MAX_PENDING_CONTRACT_BYTES = 256 * 1024;
 
 const wrapContractHandler = HandlerClass => {
   const handler = new HandlerClass();
@@ -133,17 +135,26 @@ function toContractMessage(message) {
   return { type, payload, metadata };
 }
 
-const queueContractMessage = (state, task) => {
+const queueContractMessage = (state, task, size) => {
+  if (state.pendingMessages >= MAX_PENDING_CONTRACT_MESSAGES || state.pendingBytes + size > MAX_PENDING_CONTRACT_BYTES) {
+    state.socket.close?.(1013, "Slow consumer");
+    return false;
+  }
+  state.pendingMessages += 1;
+  state.pendingBytes += size;
   state.outgoing = state.outgoing.then(task).catch(error => {
     state.route.handleError(state.socket, error);
     state.socket.close?.(1011, "Invalid server message");
     return false;
+  }).finally(() => {
+    state.pendingMessages -= 1;
+    state.pendingBytes -= size;
   });
   return true;
 };
 
 function installContractTransport(route, socket) {
-  const state = { outgoing: Promise.resolve(), route, socket };
+  const state = { outgoing: Promise.resolve(), pendingMessages: 0, pendingBytes: 0, route, socket };
   socket.sendJson = message => {
     let event;
     try {
@@ -154,7 +165,15 @@ function installContractTransport(route, socket) {
       return false;
     }
 
-    return queueContractMessage(state, () => contract.send(socket, event.type, event.payload, event.metadata));
+    let size;
+    try {
+      size = Buffer.byteLength(JSON.stringify(event));
+    } catch (error) {
+      route.handleError(socket, error);
+      socket.close?.(1011, "Invalid server message");
+      return false;
+    }
+    return queueContractMessage(state, () => contract.send(socket, event.type, event.payload, event.metadata), size);
   };
 }
 
