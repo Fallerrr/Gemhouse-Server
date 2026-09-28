@@ -1,18 +1,25 @@
-const { SocketServer, HttpServer } = require("redweb");
+const { SocketServer } = require("redweb");
 const { DefaultRoute } = require("./DefaultRoute");
 
-const websocketPort = Number(
-  process.env.PORT ||
-  process.env.WS_PORT ||
-  3000
-);
+function getListenerPort(environment = process.env) {
+  return Number(environment.PORT || environment.WS_PORT || 3000);
+}
 
-new SocketServer({
-  port: websocketPort,
-  routes: [DefaultRoute],
-});
+function startServer({
+  port = getListenerPort(),
+} = {}) {
+  return new SocketServer({
+    port,
+    routes: [DefaultRoute],
+  });
+}
 
-new HttpServer({
-  port: process.env.HTTP_PORT ? Number(process.env.HTTP_PORT) : 3001,
-  publicPaths: ["./public"],
-});
+function runIfMain(entryModule, start = startServer) {
+  if (require.main === entryModule) {
+    return start();
+  }
+}
+
+runIfMain(module);
+
+module.exports = { getListenerPort, runIfMain, startServer };

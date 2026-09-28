@@ -6,16 +6,15 @@ WORKDIR /app
 
 # Copy package files and install dependencies
 COPY package*.json ./
-RUN npm install
+RUN npm ci --omit=dev
 
 # Copy runtime code explicitly so deploy ignores cannot accidentally drop the entrypoint
 COPY index.js DefaultRoute.js ./
 COPY handlers ./handlers
 COPY services ./services
-COPY public ./public
 RUN test -f /app/index.js
 
-# Expose WebSocket port
+# Expose the WebSocket listener port
 EXPOSE 3000
 
 # Start your server

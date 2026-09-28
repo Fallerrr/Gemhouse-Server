@@ -10,7 +10,7 @@ function isSocketOpen(socket) {
 }
 
 class PlayerRegistry extends SocketRegistry {
-  constructor() {
+  constructor({ inactivityEnabled = MATCH_INACTIVITY_ENABLED } = {}) {
     super();
     this.items = []; // ensure array exists if base class doesn't initialize
     this.maxPlayers = Infinity;
@@ -19,7 +19,7 @@ class PlayerRegistry extends SocketRegistry {
     this._removeValidator = null;
 
     this.inactivityInterval = null;
-    if (MATCH_INACTIVITY_ENABLED) {
+    if (inactivityEnabled) {
       this.inactivityInterval = setInterval(
         () => this.sweepInactivePlayers(),
         MATCH_INACTIVITY_SWEEP_INTERVAL_MS
@@ -192,6 +192,12 @@ class PlayerRegistry extends SocketRegistry {
     return this.items.filter(p => p.matchId === matchId);
   }
 
+  isAtCapacity() {
+    return Number.isFinite(this.maxPlayers) &&
+      this.maxPlayers > 0 &&
+      this.count() >= this.maxPlayers;
+  }
+
   getSanitizedList(matchId = null) {
     return this.items
       .filter(p => matchId == null || p.matchId === matchId)
@@ -212,4 +218,7 @@ class PlayerRegistry extends SocketRegistry {
   }
 }
 
-module.exports = new PlayerRegistry();
+const registry = new PlayerRegistry();
+registry.createIsolatedRegistry = (options) => new PlayerRegistry(options);
+
+module.exports = registry;
