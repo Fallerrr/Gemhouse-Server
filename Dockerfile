@@ -11,8 +11,9 @@ RUN npm ci --omit=dev
 # Copy runtime code explicitly so deploy ignores cannot accidentally drop the entrypoint
 COPY index.js DefaultRoute.js ./
 COPY handlers ./handlers
+COPY protocol ./protocol
 COPY services ./services
-RUN test -f /app/index.js
+RUN test -f /app/index.js && test -f /app/protocol/socket-contract.js
 
 # Expose the WebSocket listener port
 EXPOSE 3000
