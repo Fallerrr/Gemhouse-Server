@@ -17,6 +17,7 @@ class PlayerRegistry extends SocketRegistry {
     this.nextJoinIndexByMatch = new Map();
     this._createValidator = null;
     this._removeValidator = null;
+    this.roomRegistry = null;
 
     this.inactivityInterval = null;
     if (inactivityEnabled) {
@@ -33,6 +34,16 @@ class PlayerRegistry extends SocketRegistry {
 
   setCreateValidator(fn) { this._createValidator = fn; }
   setRemoveValidator(fn) { this._removeValidator = fn; }
+
+  setRoomRegistry(roomRegistry) {
+    this.roomRegistry = roomRegistry || null;
+  }
+
+  joinRoom(socket, matchId) {
+    if (!this.roomRegistry) return true;
+    if (!socket || typeof matchId !== "string") return false;
+    return this.roomRegistry.join(matchId, socket);
+  }
 
   create(socket, id, data = {}) {
     return new Player(socket, id, data, this);
@@ -71,6 +82,9 @@ class PlayerRegistry extends SocketRegistry {
     const player = this.items[idx];
     if (this._removeValidator && !this._removeValidator(player)) return false;
 
+    if (this.roomRegistry && player.matchId) {
+      this.roomRegistry.leave(player.matchId, player.socket);
+    }
     this.removePlayerFromMatch(player);
     this.items.splice(idx, 1);
     return true;
@@ -207,6 +221,13 @@ class PlayerRegistry extends SocketRegistry {
   broadcast(data, excludeSocket = null, matchId = null, options = {}) {
     if (options.pruneClosed !== false) {
       this.pruneClosedPlayers();
+    }
+
+    if (matchId != null && this.roomRegistry) {
+      const payload = data.timestamp === undefined
+        ? { ...data, timestamp: Date.now() }
+        : data;
+      return this.roomRegistry.broadcast(matchId, payload, { except: excludeSocket || undefined });
     }
 
     this.items.forEach(p => {

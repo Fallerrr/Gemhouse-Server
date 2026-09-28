@@ -11,15 +11,25 @@ npm ci
 npm start
 ```
 
-The WebSocket route is `ws://localhost:3000/socket`. Set `PORT` to change the listener port (Cloud Run sets this automatically); outside Cloud Run, `WS_PORT` is used when `PORT` is unset. Node.js 22 is used by the Docker image.
+The WebSocket route is `ws://localhost:3000/socket`. Set `PORT` to change the listener port (Cloud Run sets this automatically); outside Cloud Run, `WS_PORT` is used when `PORT` is unset. The server binds to `0.0.0.0` by default; set `HOST` to override it. Node.js 22 is used by the Docker image.
 
-Redweb uses an HTTP upgrade handshake for WebSocket connections. This service does not start a separate HTTP server or serve browser files.
+Redweb owns one HTTP listener for WebSocket upgrades and health endpoints. `GET /health` reports liveness; `GET /ready` returns 200 only while the socket route is ready to accept connections. The server does not serve browser files.
+
+## Redweb Runtime
+
+The `/socket` route keeps the existing JSON packet format for the game clients. Redweb rooms provide per-match membership and broadcasts, while the player registry continues to own game state and match membership rules. Connection close removes a player from both registries.
+
+Redweb also enforces a 64 KiB message limit, a 256 KiB outbound buffer per connection, a 64-message processing queue, ordered packet handling, a 240-message burst with a 120-message-per-second refill rate, heartbeat checks, and a 1,000-connection route cap. Set `REDWEB_MAX_CONNECTIONS` to a positive integer for a different per-instance cap. Measure traffic and memory on the deployment instance before raising transport limits.
+
+Set `ALLOWED_ORIGINS` to a comma-separated list of trusted browser origins to restrict browser WebSocket handshakes. Clients without an `Origin` header remain supported. When the setting is unset, Redweb applies its default same-origin check. Connection admission has a three-second deadline. No account authentication is configured here; the client-supplied `uid` remains game metadata and must not be treated as a verified identity.
+
+The server runs one Redweb application per Node.js process, matching its process-local player and matchmaking registries. The server uses Redweb's ordered transport and room APIs without enabling its versioned socket-contract protocol, because that protocol changes the handshake and message envelope and the game client source is not part of this repository. Redweb rooms and transport controls remain wire-compatible with the current clients. The application lifecycle installs signal handlers, drains sockets on shutdown, and closes the HTTP and WebSocket listener together.
 
 ## Core Files
 
 | File | Purpose |
 | --- | --- |
-| `index.js` | Starts the WebSocket server |
+| `index.js` | Starts the Redweb application and health endpoints |
 | `DefaultRoute.js` | Registers all socket handlers and services |
 | `handlers/CreateMatchHandler.js` | Creates an available match entry |
 | `handlers/CreateDuelHandler.js` | Creates a duel challenge match and broadcasts it |

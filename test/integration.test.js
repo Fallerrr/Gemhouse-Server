@@ -50,13 +50,29 @@ function clearApplicationState() {
 
 test("WebSocket server handles match, join, player list, movement, and disconnect", async (t) => {
   clearApplicationState();
-  const server = startServer({ port: 0 });
+  const originalMaxConnections = process.env.REDWEB_MAX_CONNECTIONS;
+  process.env.REDWEB_MAX_CONNECTIONS = "0";
+  try {
+    await assert.rejects(startServer({ port: 0, bind: "127.0.0.1", signals: false }), /positive safe integer/);
+  } finally {
+    if (originalMaxConnections === undefined) delete process.env.REDWEB_MAX_CONNECTIONS;
+    else process.env.REDWEB_MAX_CONNECTIONS = originalMaxConnections;
+  }
+
+  const server = await startServer({ port: 0 });
+  await assert.rejects(startServer({ port: 0, signals: false }), /one server instance per Node.js process/);
   t.after(async () => {
     clearApplicationState();
     await server.shutdown();
   });
-  if (!server.server.listening) await once(server.server, "listening");
   const port = server.server.address().port;
+
+  const health = await fetch(`http://127.0.0.1:${port}/health`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { status: "ok" });
+  const ready = await fetch(`http://127.0.0.1:${port}/ready`);
+  assert.equal(ready.status, 200);
+  assert.deepEqual(await ready.json(), { status: "ready" });
 
   const first = new WebSocket(`ws://127.0.0.1:${port}/socket`);
   const firstMessages = messageQueue(first);
@@ -87,10 +103,26 @@ test("WebSocket server handles match, join, player list, movement, and disconnec
   assert.equal(joinedSecond.player.username, "Lin");
   await firstMessages.next(message => message.type === "player_joined" && message.uid === 202);
 
+  const otherMatchSocket = new WebSocket(`ws://127.0.0.1:${port}/socket`);
+  const otherMatchMessages = messageQueue(otherMatchSocket);
+  t.after(() => { if (otherMatchSocket.readyState < WebSocket.CLOSING) otherMatchSocket.close(); });
+  await once(otherMatchSocket, "open");
+  otherMatchSocket.send(JSON.stringify({
+    type: "create match",
+    arenaID: "arena-2",
+    modeIndex: 1,
+    uid: 303,
+    username: "Morgan",
+  }));
+  const otherMatch = await otherMatchMessages.next(message => message.type === "match_created");
+  otherMatchSocket.send(JSON.stringify({ type: "join", matchId: otherMatch.match.matchId, uid: 303, username: "Morgan" }));
+  await otherMatchMessages.next(message => message.type === "joined");
+
   first.send(JSON.stringify({ type: "move", position: { x: 4, y: 2 }, vector: { x: 1, y: 0 } }));
   const moved = await secondMessages.next(message => message.type === "player_moved");
   assert.equal(moved.player.position.x, 4);
   assert.equal(moved.player.vector.x, 1);
+  await assert.rejects(otherMatchMessages.next(message => message.type === "player_moved", 50), /Timed out waiting/);
 
   first.send(JSON.stringify({ type: "find matches" }));
   const matches = await firstMessages.next(message => message.type === "matches_list");
