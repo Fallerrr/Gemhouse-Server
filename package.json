@@ -1,0 +1,22 @@
+{
+  "name": "redsea_01",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "dev": "NODE_ENV=development node index.js",
+    "deploy": "gcloud run deploy game-server --image gcr.io/angelic-incline-423301-u5/game-server --platform managed --region us-central1 --allow-unauthenticated --port 3000",
+    "stop": "gcloud run services delete game-server --region us-central1",
+    "submit": "gcloud builds submit --tag gcr.io/angelic-incline-423301-u5/game-server"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@google-cloud/firestore": "^9.1.0",
+    "redweb": "^0.16.5",
+    "uuid": "^11.1.0"
+  }
+}
