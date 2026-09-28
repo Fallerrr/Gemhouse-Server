@@ -227,6 +227,12 @@ class PlayerRegistry extends SocketRegistry {
       const payload = data.timestamp === undefined
         ? { ...data, timestamp: Date.now() }
         : data;
+      if (typeof this.roomRegistry.members === "function") {
+        return this.roomRegistry.members(matchId).reduce((sent, socket) => {
+          if (socket === excludeSocket || !isSocketOpen(socket) || typeof socket.sendJson !== "function") return sent;
+          return socket.sendJson(payload) ? sent + 1 : sent;
+        }, 0);
+      }
       return this.roomRegistry.broadcast(matchId, payload, { except: excludeSocket || undefined });
     }
 

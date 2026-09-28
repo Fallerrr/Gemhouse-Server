@@ -22,13 +22,14 @@ const { MoveHandler, LaunchCharacterHandler } = require("../handlers/MoveHandler
 const { DealDamageHandler, UpdateHealthHandler, UpdatePointsHandler } = require("../handlers/MatchEventHandlers");
 const abilityHandlers = require("../handlers/AbilityHandlers");
 const actionHandlers = require("../handlers/PlayerActionHandlers");
+const { commandSchemaNames, commandSchemas, contract, createContractHandlers, installContractTransport, schemas, toContractMessage } = require("../protocol/socket-contract");
 
 function socket(readyState = 1) {
   return {
     readyState,
     sent: [],
     sendJson(message) { this.sent.push(message); },
-    close() { this.closed = true; },
+    close(code) { this.closed = true; this.closeCode = code; },
   };
 }
 
@@ -53,6 +54,91 @@ function resetSharedState() {
 }
 
 test.beforeEach(resetSharedState);
+
+test("Redweb socket contract validates commands, dispatches legacy handler payloads, and envelopes server events", async () => {
+  assert.equal(contract.version, "2");
+  assert.equal(contract.protocol.versions[0], "2");
+  assert.equal(schemas.error, undefined);
+  assert.equal(commandSchemaNames.length, Object.keys(commandSchemas).length);
+  assert.deepEqual(await contract.parse("join", { matchId: "match-1", uid: 42 }), { matchId: "match-1", uid: 42 });
+  await assert.rejects(contract.parse("join", { matchId: 42 }));
+  await assert.rejects(contract.parse("unknown-command", {}));
+
+  const observed = [];
+  class JoinProbe {
+    constructor() { this.name = "join"; }
+    handleMessage(target, message) { observed.push({ target, payload: { type: message.type, ...message.payload } }); }
+    onMessage(target, payload) { observed.push({ target, payload }); }
+  }
+  class CreateMatchProbe {
+    constructor() { this.name = "create match"; }
+    handleMessage() {}
+  }
+  const { CreateDuelHandler } = require("../handlers/CreateDuelHandler");
+  const { DuelAcceptedHandler, DuelDeclinedHandler, DuelRecievedHandler } = require("../handlers/DuelResponseHandlers");
+  const { FindMatchesHandler } = require("../handlers/FindMatchesHandler");
+  const { UpdateRankHandler } = require("../handlers/RankHandler");
+  const { ChatHandler, ReportChatHandler } = require("../handlers/ChatHandler");
+  const { MoveHandler, LaunchCharacterHandler } = require("../handlers/MoveHandler");
+  const { GetPlayersHandler } = require("../handlers/GetPlayersHandler");
+  const { ShootHandler } = require("../handlers/ShootHandler");
+  const actionClasses = Object.values(require("../handlers/PlayerActionHandlers"));
+  const abilityClasses = Object.values(require("../handlers/AbilityHandlers"));
+  const eventClasses = Object.values(require("../handlers/MatchEventHandlers"));
+  const allClasses = [JoinProbe, CreateMatchProbe, CreateDuelHandler, DuelRecievedHandler, DuelAcceptedHandler, DuelDeclinedHandler,
+    FindMatchesHandler, UpdateRankHandler, ChatHandler, ReportChatHandler, MoveHandler, GetPlayersHandler, ShootHandler,
+    ...actionClasses, ...abilityClasses, ...eventClasses, LaunchCharacterHandler];
+  const contractHandlers = createContractHandlers(allClasses);
+  assert.equal(contractHandlers.length, allClasses.length);
+  assert.equal(new contractHandlers[0]().name, "join");
+  const contractJoin = new contractHandlers[0]();
+  const contractTarget = {};
+  await contractJoin.onMessage(contractTarget, { payload: { matchId: "probe" } });
+  assert.deepEqual(observed, [{ target: contractTarget, payload: { matchId: "probe" } }]);
+  await contractJoin.onMessage({}, { payload: { matchId: "probe" }, requestId: "req-callback", sequence: 4 });
+  assert.deepEqual(observed[1], { target: {}, payload: { matchId: "probe", requestId: "req-callback", sequence: 4 } });
+
+  assert.deepEqual(toContractMessage({ type: "error", message: "No player" }), {
+    type: "server_error", payload: { message: "No player" }, metadata: {},
+  });
+  assert.deepEqual(toContractMessage({ type: "joined", id: "p1", requestId: "req-2", sequence: 9 }), {
+    type: "joined", payload: { id: "p1" }, metadata: { requestId: "req-2", sequence: 9 },
+  });
+  assert.throws(() => toContractMessage(null), /object with a message type/);
+  assert.throws(() => toContractMessage({ type: "missing" }), /No Redweb socket contract/);
+
+  const sent = [];
+  const wire = [];
+  const sendFailures = [];
+  const socketLike = {
+    context: { protocol: { version: "2" } },
+    sendEvent: (...args) => { sent.push(args); return true; },
+    send: data => { wire.push(JSON.parse(data)); },
+  };
+  const errors = [];
+  const route = { handleError: (_socket, error) => errors.push(error) };
+  socketLike.close = code => { socketLike.closed = true; socketLike.closeCode = code; };
+  installContractTransport(route, socketLike);
+  assert.equal(socketLike.sendJson({ type: "joined", id: "p2", playerGivenIndex: null, player: {} }), true);
+  assert.equal(socketLike.sendJson({ type: "joined", id: "p2", playerGivenIndex: null, player: {}, requestId: "req-3", sequence: 3 }), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent[0], ["joined", { id: "p2", playerGivenIndex: null, player: {} }, {}]);
+  assert.equal(socketLike.sendJson({ type: "unknown-event" }), false);
+  assert.equal(errors.length, 1);
+  assert.equal(socketLike.closed, true);
+  assert.equal(socketLike.closeCode, 1011);
+
+  const failingSocket = {
+    context: { protocol: { version: "2" } },
+    sendEvent: () => { throw new Error("transport failure"); },
+    close: code => sendFailures.push(code),
+  };
+  installContractTransport(route, failingSocket);
+  failingSocket.sendJson({ type: "joined", id: "p3" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(errors.length, 2);
+  assert.deepEqual(sendFailures, [1011]);
+});
 
 function availableMatch(matchId, options = {}) {
   return matchmaking.createMatch({
@@ -267,6 +353,13 @@ test("PlayerRegistry delegates match membership and scoped broadcasts to the att
   const suppliedTimestamp = { type: "existing-time", timestamp: 5 };
   local.broadcast(suppliedTimestamp, null, "room-match");
   assert.equal(calls[2][2], suppliedTimestamp);
+  local.setRoomRegistry({
+    members: () => [transport, socket(), { readyState: 1, sendJson: () => true }],
+    leave: (...args) => calls.push(["leave", ...args]),
+    broadcast() { throw new Error("The member based contract path should be used"); },
+  });
+  assert.equal(local.broadcast({ type: "contract-event" }, null, "room-match"), 1);
+  assert.equal(transport.sent.at(-1).type, "contract-event");
   assert.equal(local.remove(player), true);
   assert.deepEqual(calls[3], ["leave", "room-match", transport]);
   local.setRoomRegistry(null);

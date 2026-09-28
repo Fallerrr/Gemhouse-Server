@@ -17,13 +17,13 @@ Redweb owns one HTTP listener for WebSocket upgrades and health endpoints. `GET 
 
 ## Redweb Runtime
 
-The `/socket` route keeps the existing JSON packet format for the game clients. Redweb rooms provide per-match membership and broadcasts, while the player registry continues to own game state and match membership rules. Connection close removes a player from both registries.
+The `/socket` route uses Redweb's versioned socket-contract protocol (version 2). Redweb rooms provide per-match membership and broadcasts, while the player registry continues to own game state and match membership rules. Connection close removes a player from both registries.
 
 Redweb also enforces a 64 KiB message limit, a 256 KiB outbound buffer per connection, a 64-message processing queue, ordered packet handling, a 240-message burst with a 120-message-per-second refill rate, heartbeat checks, and a 1,000-connection route cap. Set `REDWEB_MAX_CONNECTIONS` to a positive integer for a different per-instance cap. Measure traffic and memory on the deployment instance before raising transport limits.
 
 Set `ALLOWED_ORIGINS` to a comma-separated list of trusted browser origins to restrict browser WebSocket handshakes. Clients without an `Origin` header remain supported. When the setting is unset, Redweb applies its default same-origin check. Connection admission has a three-second deadline. No account authentication is configured here; the client-supplied `uid` remains game metadata and must not be treated as a verified identity.
 
-The server runs one Redweb application per Node.js process, matching its process-local player and matchmaking registries. The server uses Redweb's ordered transport and room APIs without enabling its versioned socket-contract protocol, because that protocol changes the handshake and message envelope and the game client source is not part of this repository. Redweb rooms and transport controls remain wire-compatible with the current clients. The application lifecycle installs signal handlers, drains sockets on shutdown, and closes the HTTP and WebSocket listener together.
+The server runs one Redweb application per Node.js process, matching its process-local player and matchmaking registries. The socket contract validates each command and server event; use the same contract module in JavaScript clients where practical. The application lifecycle installs signal handlers, drains sockets on shutdown, and closes the HTTP and WebSocket listener together.
 
 ## Core Files
 
@@ -41,6 +41,7 @@ The server runs one Redweb application per Node.js process, matching its process
 | `handlers/AbilityHandlers.js` | Handles ability usage events |
 | `handlers/MatchEventHandlers.js` | Handles damage and match point updates |
 | `handlers/GetPlayersHandler.js` | Sends the current player list back to a client |
+| `protocol/socket-contract.js` | Defines protocol v2 payload schemas and Redweb client/server contract adapters |
 | `handlers/Player.js` | Server-side player model |
 | `handlers/PlayerRegistry.js` | Stores connected players and broadcasts messages |
 | `services/MatchmakingService.js` | Stores available matches and each match's joined-player list |
@@ -55,12 +56,14 @@ Run the unit and WebSocket integration tests with `npm test`. Use `npm run test:
 
 ## WebSocket Protocol
 
-Every incoming packet must include a `type` field.
+Clients connect to `ws://localhost:3000/socket?redwebVersion=2`. Every command uses a versioned Redweb envelope with `v`, `type`, and `payload`; for example: `{"v":"2","type":"join","payload":{"matchId":"arena-01","uid":1234567890,"username":"Ada"}}`. Existing clients must be updated because unversioned packets are rejected. Protocol errors use `type: "error"` with an `error` object; application errors use the `server_error` event. The validators and JavaScript client adapter are in [`protocol/socket-contract.js`](protocol/socket-contract.js). Clients in other languages should implement the same JSON envelope and payload schemas.
 Match inactivity removal is disabled by default. It can be re-enabled with `MATCH_INACTIVITY_ENABLED=true`, which removes players from a match after 30 seconds without client messages.
 
 Global ranks use Firestore automatically on Cloud Run. Local development uses `data/ranks.json` unless `RANK_STORAGE=firestore` is set. The Firestore collection can be changed with `RANKS_COLLECTION`; the local JSON path can be changed with `RANKS_FILE`.
 
 ### Incoming Messages
+
+The following payloads are placed inside the Redweb v2 envelope shown above. Examples omit the envelope for readability; send each example's fields under `payload` and preserve its `type` as the envelope type.
 
 #### `create match`
 

@@ -1,5 +1,6 @@
 const { SocketRoute } = require("redweb");
 const registry = require("./handlers/PlayerRegistry");
+const { contract, createContractHandlers, installContractTransport } = require("./protocol/socket-contract");
 const { JoinHandler } = require("./handlers/JoinHandler");
 const { CreateMatchHandler } = require("./handlers/CreateMatchHandler");
 const { CreateDuelHandler } = require("./handlers/CreateDuelHandler");
@@ -70,7 +71,7 @@ function getSocketRouteOptions(environment = process.env) {
     return {
         path: "/socket",
         allowDuplicateConnections: true,
-        handlers: [
+        handlers: createContractHandlers([
             JoinHandler,
             CreateMatchHandler,
             CreateDuelHandler,
@@ -104,7 +105,7 @@ function getSocketRouteOptions(environment = process.env) {
             StopJumpingHandler,
             WalkHandler,
             WalkRightHandler,
-        ],
+        ]),
         services: [MatchService],
         ...(admission ? { admission } : {}),
         rooms: {
@@ -121,6 +122,7 @@ function getSocketRouteOptions(environment = process.env) {
             slowConsumerAction: "disconnect",
         },
         websocketOptions: { maxPayload: 64 * 1024 },
+        protocol: contract.protocol,
         orderedMessages: true,
         heartbeat: { intervalMs: 30_000, timeoutMs: 10_000 },
         maxPendingUpgrades: 64,
@@ -134,6 +136,9 @@ class DefaultRoute extends SocketRoute {
         super(getSocketRouteOptions());
 
         registry.setRoomRegistry(this.rooms);
+        this.connectionOpenCallback = (socket) => {
+            installContractTransport(this, socket);
+        };
 
         this.connectionCloseCallback = (socket) => {
             registry.removeBySocket(socket, "disconnected");
