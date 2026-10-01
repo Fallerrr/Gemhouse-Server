@@ -45,7 +45,7 @@ Run the unit and WebSocket integration tests with `npm test`. Use `npm run test:
 
 ## WebSocket Protocol
 
-Every incoming packet must include a `type` field.
+The server accepts both the existing flat JSON packets and Redweb v1 envelopes. For an envelope, the `payload` fields are passed to the existing message handler and the envelope's top-level `type` selects that handler. Responses keep their existing flat JSON format, so current clients do not need to change.
 Match inactivity removal is disabled by default. It can be re-enabled with `MATCH_INACTIVITY_ENABLED=true`, which removes players from a match after 30 seconds without client messages.
 
 Global ranks use Firestore automatically on Cloud Run. Local development uses `data/ranks.json` unless `RANK_STORAGE=firestore` is set. The Firestore collection can be changed with `RANKS_COLLECTION`; the local JSON path can be changed with `RANKS_FILE`.
