@@ -12,10 +12,6 @@ function shouldUseFirestore() {
 }
 
 function getFirestore() {
-  if (!shouldUseFirestore()) {
-    return null;
-  }
-
   if (!firestore) {
     const { Firestore } = require("@google-cloud/firestore");
     firestore = new Firestore();

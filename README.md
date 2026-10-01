@@ -1,25 +1,25 @@
-# Redweb Multiplayer - Redsea MVP
+# Gemhouse Server
 
-Redsea is a plug-and-play multiplayer backend built on top of [RedWeb](https://www.npmjs.com/package/redweb). This repo is a lightweight multiplayer server that uses JSON messages over WebSockets for player state, combat, abilities, and match events.
+Gemhouse Server is a multiplayer game backend built on [Redweb 0.16.5](https://redweb.magnisolution.com/). It accepts JSON messages over WebSockets for player state, combat, abilities, match events, matchmaking, chat, and global ranks. This repository contains the WebSocket server and no browser client assets.
 
 ## Installation
 
 ```bash
-git clone https://github.com/lakam99/Redweb-Multiplayer.git
-cd Redweb-Multiplayer
-npm install
-node index.js
+git clone https://github.com/Fallerrr/Gemhouse-Server.git
+cd Gemhouse-Server
+npm ci
+npm start
 ```
 
-WebSocket server: `ws://localhost:3000/`
+The WebSocket route is `ws://localhost:3000/socket`. Set `PORT` to change the listener port (Cloud Run sets this automatically); outside Cloud Run, `WS_PORT` is used when `PORT` is unset. Node.js 22 is used by the Docker image.
 
-HTTP server: `http://localhost:3001/`
+Redweb uses an HTTP upgrade handshake for WebSocket connections. This service does not start a separate HTTP server or serve browser files.
 
 ## Core Files
 
 | File | Purpose |
 | --- | --- |
-| `index.js` | Starts the WebSocket and HTTP servers |
+| `index.js` | Starts the WebSocket server |
 | `DefaultRoute.js` | Registers all socket handlers and services |
 | `handlers/CreateMatchHandler.js` | Creates an available match entry |
 | `handlers/CreateDuelHandler.js` | Creates a duel challenge match and broadcasts it |
@@ -36,6 +36,12 @@ HTTP server: `http://localhost:3001/`
 | `services/MatchmakingService.js` | Stores available matches and each match's joined-player list |
 | `services/MatchService.js` | Broadcasts match start / match over events |
 | `services/RankService.js` | Persists global ranks in Firestore on Cloud Run, or a local JSON file during development |
+| `test/unit.test.js` | Unit tests for registry, matchmaking, handlers, and rank storage |
+| `test/integration.test.js` | WebSocket integration tests against a live Redweb server |
+
+## Tests
+
+Run the unit and WebSocket integration tests with `npm test`. Use `npm run test:unit` or `npm run test:integration` to run either suite alone. `npm run test:coverage` enforces 100% line, branch, function, and statement coverage for the server source.
 
 ## WebSocket Protocol
 
