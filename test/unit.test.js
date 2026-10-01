@@ -22,6 +22,39 @@ const { MoveHandler, LaunchCharacterHandler } = require("../handlers/MoveHandler
 const { DealDamageHandler, UpdateHealthHandler, UpdatePointsHandler } = require("../handlers/MatchEventHandlers");
 const abilityHandlers = require("../handlers/AbilityHandlers");
 const actionHandlers = require("../handlers/PlayerActionHandlers");
+const { normalizeIncomingMessage, withEnvelopeCompatibility } = require("../handlers/EnvelopeCompatibility");
+
+test("Redweb envelopes normalize at the handler boundary while legacy messages pass through", () => {
+  const envelope = {
+    v: "1",
+    type: "create duel",
+    requestId: "request-1",
+    sequence: 7,
+    payload: { modeIndex: 0, uid: 123, username: "Ada", type: "ignored" },
+  };
+  assert.deepEqual(normalizeIncomingMessage(envelope), {
+    modeIndex: 0,
+    uid: 123,
+    username: "Ada",
+    type: "create duel",
+    requestId: "request-1",
+    sequence: 7,
+  });
+
+  const legacy = { type: "create duel", modeIndex: 0 };
+  assert.equal(normalizeIncomingMessage(legacy), legacy);
+  for (const malformed of [null, "text", { v: 1, type: "x", payload: {} }, { v: "1", type: "x", payload: [] }, { v: "1", type: "x", payload: null }]) {
+    assert.equal(normalizeIncomingMessage(malformed), malformed);
+  }
+
+  let received;
+  class CapturingHandler {
+    handleMessage(_socket, message) { received = message; }
+  }
+  const CompatibleHandler = withEnvelopeCompatibility(CapturingHandler);
+  new CompatibleHandler().handleMessage({}, envelope);
+  assert.deepEqual(received, normalizeIncomingMessage(envelope));
+});
 
 function socket(readyState = 1) {
   return {

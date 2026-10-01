@@ -105,3 +105,27 @@ test("WebSocket server handles match, join, player list, movement, and disconnec
   const left = await firstMessages.next(message => message.type === "player_left");
   assert.equal(left.reason, "disconnected");
 });
+
+test("WebSocket server accepts a Redweb v1 envelope and preserves legacy responses", async (t) => {
+  clearApplicationState();
+  const server = startServer({ port: 0 });
+  t.after(async () => {
+    clearApplicationState();
+    await server.shutdown();
+  });
+  if (!server.server.listening) await once(server.server, "listening");
+
+  const client = new WebSocket(`ws://127.0.0.1:${server.server.address().port}/socket`);
+  const messages = messageQueue(client);
+  t.after(() => { if (client.readyState < WebSocket.CLOSING) client.close(); });
+  await once(client, "open");
+  client.send(JSON.stringify({
+    v: "1",
+    type: "create duel",
+    payload: { modeIndex: 0, uid: 987, username: "Envelope Player", challengedUid: 654 },
+  }));
+
+  const response = await messages.next(message => message.type === "duel_created");
+  assert.equal(response.challengedUid, 654);
+  assert.equal(response.v, undefined);
+});
