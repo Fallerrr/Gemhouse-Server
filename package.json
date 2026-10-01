@@ -11,7 +11,7 @@
     "submit": "gcloud builds submit --tag gcr.io/angelic-incline-423301-u5/game-server",
     "test:unit": "node --test test/unit.test.js",
     "test:integration": "node --test test/integration.test.js",
-    "test:coverage": "c8 --all --include=DefaultRoute.js --include=index.js --include=handlers/**/*.js --include=services/**/*.js --reporter=text --check-coverage --lines=100 --functions=100 --branches=100 --statements=100 node --test test/unit.test.js test/integration.test.js"
+    "test:coverage": "c8 --all --include=DefaultRoute.js --include=index.js --include=handlers/**/*.js --include=services/**/*.js --include=protocol/**/*.js --reporter=text --check-coverage --lines=100 --functions=100 --branches=100 --statements=100 node --test test/unit.test.js test/integration.test.js"
   },
   "keywords": [],
   "author": "",
@@ -20,7 +20,8 @@
   "dependencies": {
     "@google-cloud/firestore": "^9.1.0",
     "redweb": "^0.16.5",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "c8": "^12.0.0",

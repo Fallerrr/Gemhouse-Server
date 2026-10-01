@@ -1,5 +1,6 @@
 const { SocketRoute } = require("redweb");
 const registry = require("./handlers/PlayerRegistry");
+const { contract, createContractHandlers, installContractTransport } = require("./protocol/socket-contract");
 const { JoinHandler } = require("./handlers/JoinHandler");
 const { CreateMatchHandler } = require("./handlers/CreateMatchHandler");
 const { CreateDuelHandler } = require("./handlers/CreateDuelHandler");
@@ -41,48 +42,103 @@ const {
     UpdatePointsHandler,
 } = require("./handlers/MatchEventHandlers");
 
+function getAllowedOrigins(environment = process.env) {
+    return [...new Set((environment.ALLOWED_ORIGINS || "")
+        .split(",")
+        .map(origin => origin.trim())
+        .filter(Boolean))];
+}
+
+function getPositiveInteger(environment, name, fallback) {
+    const raw = environment[name];
+    if (raw == null || raw === "") return fallback;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1) {
+        throw new Error(`${name} must be a positive safe integer`);
+    }
+    return value;
+}
+
+function getSocketRouteOptions(environment = process.env) {
+    const allowedOrigins = getAllowedOrigins(environment);
+    const admission = allowedOrigins.length
+        ? {
+            timeoutMs: 3000,
+            origins: origin => origin == null || allowedOrigins.includes(origin),
+        }
+        : undefined;
+
+    return {
+        path: "/socket",
+        allowDuplicateConnections: true,
+        handlers: createContractHandlers([
+            JoinHandler,
+            CreateMatchHandler,
+            CreateDuelHandler,
+            DuelRecievedHandler,
+            DuelAcceptedHandler,
+            DuelDeclinedHandler,
+            FindMatchesHandler,
+            UpdateRankHandler,
+            ChatHandler,
+            ReportChatHandler,
+            MoveHandler,
+            GetPlayersHandler,
+            ShootHandler,
+            AttackHandler,
+            SeehnDiskHandler,
+            SeehnDisksReadyHandler,
+            DealDamageHandler,
+            UpdateHealthHandler,
+            LaunchCharacterHandler,
+            SuperSpecialHandler,
+            SuperSpecialReadyHandler,
+            SpecialHandler,
+            SpecialReadyHandler,
+            HoverboardHandler,
+            InvincibleHandler,
+            DodgeHandler,
+            StunnedHandler,
+            UpdatePointsHandler,
+            UpdateDirectionHandler,
+            JumpHandler,
+            StopJumpingHandler,
+            WalkHandler,
+            WalkRightHandler,
+        ]),
+        services: [MatchService],
+        ...(admission ? { admission } : {}),
+        rooms: {
+            maxRooms: 1000,
+            maxMembersPerRoom: 1000,
+            maxRoomsPerConnection: 1,
+            maxRoomIdLength: 128,
+        },
+        limits: {
+            maxConnections: getPositiveInteger(environment, "REDWEB_MAX_CONNECTIONS", 1000),
+            maxBufferedBytes: 256 * 1024,
+            maxPendingMessages: 64,
+            messageRate: { capacity: 240, refillPerSecond: 120, action: "disconnect" },
+            slowConsumerAction: "disconnect",
+        },
+        websocketOptions: { maxPayload: 64 * 1024 },
+        protocol: contract.protocol,
+        orderedMessages: true,
+        heartbeat: { intervalMs: 30_000, timeoutMs: 10_000 },
+        maxPendingUpgrades: 64,
+        shutdownTimeoutMs: 5000,
+        logger: null,
+    };
+}
+
 class DefaultRoute extends SocketRoute {
     constructor() {
-        super({
-            "path": "/socket",
-            "handlers": [
-                JoinHandler,
-                CreateMatchHandler,
-                CreateDuelHandler,
-                DuelRecievedHandler,
-                DuelAcceptedHandler,
-                DuelDeclinedHandler,
-                FindMatchesHandler,
-                UpdateRankHandler,
-                ChatHandler,
-                ReportChatHandler,
-                MoveHandler,
-                GetPlayersHandler,
-                ShootHandler,
-                AttackHandler,
-                SeehnDiskHandler,
-                SeehnDisksReadyHandler,
-                DealDamageHandler,
-                UpdateHealthHandler,
-                LaunchCharacterHandler,
-                SuperSpecialHandler,
-                SuperSpecialReadyHandler,
-                SpecialHandler,
-                SpecialReadyHandler,
-                HoverboardHandler,
-                InvincibleHandler,
-                DodgeHandler,
-                StunnedHandler,
-                UpdatePointsHandler,
-                UpdateDirectionHandler,
-                JumpHandler,
-                StopJumpingHandler,
-                WalkHandler,
-                WalkRightHandler,
-            ],
-            allowDuplicateConnections: true,
-            services: [MatchService]
-        })
+        super(getSocketRouteOptions());
+
+        registry.setRoomRegistry(this.rooms);
+        this.connectionOpenCallback = (socket) => {
+            installContractTransport(this, socket);
+        };
 
         this.connectionCloseCallback = (socket) => {
             registry.removeBySocket(socket, "disconnected");
@@ -90,4 +146,4 @@ class DefaultRoute extends SocketRoute {
     }
 }
 
-module.exports = { DefaultRoute };
+module.exports = { DefaultRoute, getAllowedOrigins, getPositiveInteger, getSocketRouteOptions };

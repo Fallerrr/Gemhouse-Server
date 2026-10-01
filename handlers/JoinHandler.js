@@ -105,6 +105,11 @@ class JoinHandler extends BaseHandler {
             sendJsonWithLog(socket, { type: "error", message: "Join rejected" }, "socket:unregistered");
             return;
         }
+        if (!registry.joinRoom(socket, matchId)) {
+            registry.remove(player);
+            sendJsonWithLog(socket, { type: "error", message: "Match room is full" }, "socket:unregistered");
+            return;
+        }
         matchmakingService.addPlayer(player);
 
         player.send("joined", {

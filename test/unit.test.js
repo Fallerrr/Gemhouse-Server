@@ -22,13 +22,14 @@ const { MoveHandler, LaunchCharacterHandler } = require("../handlers/MoveHandler
 const { DealDamageHandler, UpdateHealthHandler, UpdatePointsHandler } = require("../handlers/MatchEventHandlers");
 const abilityHandlers = require("../handlers/AbilityHandlers");
 const actionHandlers = require("../handlers/PlayerActionHandlers");
+const { commandSchemaNames, commandSchemas, contract, createContractHandlers, installContractTransport, schemas, toContractMessage } = require("../protocol/socket-contract");
 
 function socket(readyState = 1) {
   return {
     readyState,
     sent: [],
     sendJson(message) { this.sent.push(message); },
-    close() { this.closed = true; },
+    close(code) { this.closed = true; this.closeCode = code; },
   };
 }
 
@@ -53,6 +54,116 @@ function resetSharedState() {
 }
 
 test.beforeEach(resetSharedState);
+
+test("Redweb socket contract validates commands, dispatches legacy handler payloads, and envelopes server events", async () => {
+  assert.equal(contract.version, "2");
+  assert.equal(contract.protocol.versions[0], "2");
+  assert.equal(schemas.error, undefined);
+  assert.equal(commandSchemaNames.length, Object.keys(commandSchemas).length);
+  assert.deepEqual(await contract.parse("join", { matchId: "match-1", uid: 42 }), { matchId: "match-1", uid: 42 });
+  await assert.rejects(contract.parse("join", { matchId: 42 }));
+  await assert.rejects(contract.parse("unknown-command", {}));
+
+  const observed = [];
+  class JoinProbe {
+    constructor() { this.name = "join"; }
+    handleMessage(target, message) { observed.push({ target, payload: { type: message.type, ...message.payload } }); }
+    onMessage(target, payload) { observed.push({ target, payload }); }
+  }
+  class CreateMatchProbe {
+    constructor() { this.name = "create match"; }
+    handleMessage() {}
+  }
+  const { CreateDuelHandler } = require("../handlers/CreateDuelHandler");
+  const { DuelAcceptedHandler, DuelDeclinedHandler, DuelRecievedHandler } = require("../handlers/DuelResponseHandlers");
+  const { FindMatchesHandler } = require("../handlers/FindMatchesHandler");
+  const { UpdateRankHandler } = require("../handlers/RankHandler");
+  const { ChatHandler, ReportChatHandler } = require("../handlers/ChatHandler");
+  const { MoveHandler, LaunchCharacterHandler } = require("../handlers/MoveHandler");
+  const { GetPlayersHandler } = require("../handlers/GetPlayersHandler");
+  const { ShootHandler } = require("../handlers/ShootHandler");
+  const actionClasses = Object.values(require("../handlers/PlayerActionHandlers"));
+  const abilityClasses = Object.values(require("../handlers/AbilityHandlers"));
+  const eventClasses = Object.values(require("../handlers/MatchEventHandlers"));
+  const allClasses = [JoinProbe, CreateMatchProbe, CreateDuelHandler, DuelRecievedHandler, DuelAcceptedHandler, DuelDeclinedHandler,
+    FindMatchesHandler, UpdateRankHandler, ChatHandler, ReportChatHandler, MoveHandler, GetPlayersHandler, ShootHandler,
+    ...actionClasses, ...abilityClasses, ...eventClasses, LaunchCharacterHandler];
+  const contractHandlers = createContractHandlers(allClasses);
+  assert.equal(contractHandlers.length, allClasses.length);
+  assert.equal(new contractHandlers[0]().name, "join");
+  const contractJoin = new contractHandlers[0]();
+  const contractTarget = {};
+  await contractJoin.onMessage(contractTarget, { payload: { matchId: "probe" } });
+  assert.deepEqual(observed, [{ target: contractTarget, payload: { matchId: "probe" } }]);
+  await contractJoin.onMessage({}, { payload: { matchId: "probe" }, requestId: "req-callback", sequence: 4 });
+  assert.deepEqual(observed[1], { target: {}, payload: { matchId: "probe", requestId: "req-callback", sequence: 4 } });
+
+  assert.deepEqual(toContractMessage({ type: "error", message: "No player" }), {
+    type: "server_error", payload: { message: "No player" }, metadata: {},
+  });
+  assert.deepEqual(toContractMessage({ type: "joined", id: "p1", requestId: "req-2", sequence: 9 }), {
+    type: "joined", payload: { id: "p1" }, metadata: { requestId: "req-2", sequence: 9 },
+  });
+  assert.throws(() => toContractMessage(null), /object with a message type/);
+  assert.throws(() => toContractMessage({ type: "missing" }), /No Redweb socket contract/);
+
+  const sent = [];
+  const wire = [];
+  const sendFailures = [];
+  const socketLike = {
+    context: { protocol: { version: "2" } },
+    sendEvent: (...args) => { sent.push(args); return true; },
+    send: data => { wire.push(JSON.parse(data)); },
+  };
+  const errors = [];
+  const route = { handleError: (_socket, error) => errors.push(error) };
+  socketLike.close = code => { socketLike.closed = true; socketLike.closeCode = code; };
+  installContractTransport(route, socketLike);
+  assert.equal(socketLike.sendJson({ type: "joined", id: "p2", playerGivenIndex: null, player: {} }), true);
+  assert.equal(socketLike.sendJson({ type: "joined", id: "p2", playerGivenIndex: null, player: {}, requestId: "req-3", sequence: 3 }), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent[0], ["joined", { id: "p2", playerGivenIndex: null, player: {} }, {}]);
+  assert.equal(socketLike.sendJson({ type: "unknown-event" }), false);
+  assert.equal(errors.length, 1);
+  assert.equal(socketLike.closed, true);
+  assert.equal(socketLike.closeCode, 1011);
+
+  const failingSocket = {
+    context: { protocol: { version: "2" } },
+    sendEvent: () => { throw new Error("transport failure"); },
+    close: code => sendFailures.push(code),
+  };
+  installContractTransport(route, failingSocket);
+  failingSocket.sendJson({ type: "joined", id: "p3" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(errors.length, 2);
+  assert.deepEqual(sendFailures, [1011]);
+
+  const serializationErrors = [];
+  const invalidOutputSocket = {
+    context: { protocol: { version: "2" } },
+    close: (code, reason) => serializationErrors.push([code, reason]),
+  };
+  installContractTransport({ handleError: (_socket, error) => serializationErrors.push(error) }, invalidOutputSocket);
+  const cyclic = { type: "joined", id: "p4", playerGivenIndex: null, player: {} };
+  cyclic.player.self = cyclic;
+  assert.equal(invalidOutputSocket.sendJson(cyclic), false);
+  assert.match(serializationErrors[0].message, /^Converting circular structure to JSON/);
+  assert.deepEqual(serializationErrors[1], [1011, "Invalid server message"]);
+
+  const slowClose = [];
+  const slowSocket = {
+    context: { protocol: { version: "2" } },
+    sendEvent: () => new Promise(() => {}),
+    close: (code, reason) => slowClose.push([code, reason]),
+  };
+  installContractTransport(route, slowSocket);
+  for (let index = 0; index < 64; index++) {
+    assert.equal(slowSocket.sendJson({ type: "match_started" }), true);
+  }
+  assert.equal(slowSocket.sendJson({ type: "match_started" }), false);
+  assert.deepEqual(slowClose, [[1013, "Slow consumer"]]);
+});
 
 function availableMatch(matchId, options = {}) {
   return matchmaking.createMatch({
@@ -246,6 +357,40 @@ test("PlayerRegistry handles activity edge cases, socket filtering, and registry
   assert.deepEqual(local.all().map(item => item.id), ["sample", "other", "no-ready-state", "closed-kept"]);
 });
 
+test("PlayerRegistry delegates match membership and scoped broadcasts to the attached Redweb rooms", () => {
+  const local = registry.createIsolatedRegistry();
+  const calls = [];
+  const transport = socket();
+  local.setRoomRegistry({
+    join(roomId, currentSocket) { calls.push(["join", roomId, currentSocket]); return true; },
+    leave(roomId, currentSocket) { calls.push(["leave", roomId, currentSocket]); return true; },
+    broadcast(roomId, payload, options) { calls.push(["broadcast", roomId, payload, options]); return 1; },
+  });
+  const player = local.create(transport, "room-player", { matchId: "room-match" });
+  assert.equal(local.add(player), true);
+  assert.equal(local.joinRoom(transport, "room-match"), true);
+  assert.equal(local.joinRoom(null, "room-match"), false);
+  assert.equal(local.joinRoom(transport, null), false);
+  assert.equal(local.broadcast({ type: "room-event" }, transport, "room-match"), 1);
+  assert.equal(calls[1][2].type, "room-event");
+  assert.equal(typeof calls[1][2].timestamp, "number");
+  assert.deepEqual(calls[1][3], { except: transport });
+  const suppliedTimestamp = { type: "existing-time", timestamp: 5 };
+  local.broadcast(suppliedTimestamp, null, "room-match");
+  assert.equal(calls[2][2], suppliedTimestamp);
+  local.setRoomRegistry({
+    members: () => [transport, socket(), { readyState: 1, sendJson: () => true }],
+    leave: (...args) => calls.push(["leave", ...args]),
+    broadcast() { throw new Error("The member based contract path should be used"); },
+  });
+  assert.equal(local.broadcast({ type: "contract-event" }, null, "room-match"), 1);
+  assert.equal(transport.sent.at(-1).type, "contract-event");
+  assert.equal(local.remove(player), true);
+  assert.deepEqual(calls[3], ["leave", "room-match", transport]);
+  local.setRoomRegistry(null);
+  assert.equal(local.joinRoom(transport, "room-match"), true);
+});
+
 test("PlayerRegistry inactivity timer can be enabled and safely stopped", () => {
   const local = registry.createIsolatedRegistry({ inactivityEnabled: true });
   assert.ok(local.inactivityInterval);
@@ -361,8 +506,8 @@ test("matchmaking creates, copies, limits, joins, and removes match players", ()
   assert.equal(matchmaking.getMatch("full"), full);
 });
 
-test("Redweb entry point starts only when invoked directly", () => {
-  const { getListenerPort, runIfMain, startServer } = require("../index");
+test("Redweb entry point starts only when invoked directly and reports startup failures", async () => {
+  const { createHttpServices, getListenerPort, runIfMain, startServer, startWithErrorHandling } = require("../index");
   assert.equal(typeof startServer, "function");
   assert.equal(getListenerPort({ PORT: "8080", WS_PORT: "3001" }), 8080);
   assert.equal(getListenerPort({ PORT: "", WS_PORT: "3001" }), 3001);
@@ -371,6 +516,66 @@ test("Redweb entry point starts only when invoked directly", () => {
   assert.equal(runIfMain({}, () => called++), undefined);
   assert.equal(called, 0);
   assert.equal(runIfMain(require.main, () => ++called), 1);
+  assert.equal(called, 1);
+  assert.equal(await startWithErrorHandling(() => "started"), "started");
+  const originalExitCode = process.exitCode;
+  const originalError = console.error;
+  let loggedError;
+  console.error = (_message, error) => { loggedError = error; };
+  try {
+    await startWithErrorHandling(() => { throw new Error("startup failure"); });
+    assert.equal(loggedError.message, "startup failure");
+    assert.equal(process.exitCode, 1);
+  } finally {
+    console.error = originalError;
+    process.exitCode = originalExitCode;
+  }
+
+  const services = createHttpServices(() => ({ isReady: () => true }));
+  assert.deepEqual(services.map(service => service.serviceName), ["/health", "/ready"]);
+  let healthResponse;
+  services[0].function({}, {
+    status(code) { assert.equal(code, 200); return this; },
+    json(body) { healthResponse = body; },
+  });
+  assert.deepEqual(healthResponse, { status: "ok" });
+  let readinessResponse;
+  services[1].function({}, {
+    status(code) { assert.equal(code, 200); return this; },
+    json(body) { readinessResponse = body; },
+  });
+  assert.deepEqual(readinessResponse, { status: "ready" });
+  const notReadyService = createHttpServices(() => null)[1];
+  notReadyService.function({}, {
+    status(code) { assert.equal(code, 503); return this; },
+    json(body) { readinessResponse = body; },
+  });
+  assert.deepEqual(readinessResponse, { status: "starting" });
+});
+
+test("Redweb route options bound transport and normalize optional origin configuration", () => {
+  const { getAllowedOrigins, getPositiveInteger, getSocketRouteOptions } = require("../DefaultRoute");
+  assert.deepEqual(getAllowedOrigins({}), []);
+  assert.deepEqual(getAllowedOrigins({ ALLOWED_ORIGINS: " https://game.example, ,https://game.example,https://play.example " }), [
+    "https://game.example",
+    "https://play.example",
+  ]);
+  assert.equal(getPositiveInteger({}, "REDWEB_MAX_CONNECTIONS", 1000), 1000);
+  assert.equal(getPositiveInteger({ REDWEB_MAX_CONNECTIONS: "250" }, "REDWEB_MAX_CONNECTIONS", 1000), 250);
+  assert.throws(() => getPositiveInteger({ REDWEB_MAX_CONNECTIONS: "0" }, "REDWEB_MAX_CONNECTIONS", 1000), /positive safe integer/);
+
+  const defaults = getSocketRouteOptions({});
+  assert.equal(defaults.admission, undefined);
+  assert.equal(defaults.limits.maxConnections, 1000);
+  assert.equal(defaults.limits.maxBufferedBytes, 256 * 1024);
+  assert.equal(defaults.limits.maxPendingMessages, 64);
+  assert.equal(defaults.websocketOptions.maxPayload, 64 * 1024);
+  assert.equal(defaults.orderedMessages, true);
+  assert.deepEqual(defaults.heartbeat, { intervalMs: 30_000, timeoutMs: 10_000 });
+  const originPolicy = getSocketRouteOptions({ ALLOWED_ORIGINS: "https://game.example" }).admission.origins;
+  assert.equal(originPolicy("https://game.example"), true);
+  assert.equal(originPolicy("https://unknown.example"), false);
+  assert.equal(originPolicy(undefined), true);
 });
 
 test("rank service stores local ranks in order and handles malformed storage", async (t) => {
@@ -763,6 +968,14 @@ test("join handler handles rejoin, duplicate uid, room changes, and rejected joi
   const noUid = socket();
   handler.onMessage(noUid, { matchId: "anonymous", customization: [0, 0] });
   assert.equal(lastMessage(noUid).type, "joined");
+
+  registry.setRoomRegistry({ join: () => false, leave: () => true });
+  availableMatch("room-full");
+  const noRoom = socket();
+  handler.onMessage(noRoom, { matchId: "room-full", uid: 10 });
+  assert.equal(lastMessage(noRoom).message, "Match room is full");
+  assert.equal(registry.getBySocket(noRoom), null);
+  registry.setRoomRegistry(null);
 });
 
 test("combat and movement handlers validate inputs and broadcast within the joined match", () => {
@@ -967,6 +1180,10 @@ test("DefaultRoute registers Redweb handlers and removes disconnected players", 
   assert.equal(route.path, "/socket");
   assert.equal(route.allowDuplicateConnections, true);
   assert.ok(route.handlers.length >= 30);
+  assert.equal(registry.roomRegistry, route.rooms);
+  assert.equal(route.rooms.options.maxRoomsPerConnection, 1);
+  assert.equal(route.transportPolicy.maxConnections, 1000);
+  assert.equal(route.transportPolicy.orderedMessages, true);
   const player = joinedPlayer("route-player", "route-match");
   route.connectionCloseCallback(player.socket);
   assert.equal(registry.getById(player.id), null);
